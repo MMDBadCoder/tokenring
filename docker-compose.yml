@@ -1,0 +1,22 @@
+services:
+  tokenring:
+    build: .
+    image: tokenring:latest
+    container_name: tokenring
+    restart: unless-stopped
+    ports:
+      - '4000:4000'
+    environment:
+      # Pick your own, or leave unset and read the generated one from the logs.
+      TOKENRING_ADMIN_PASSWORD: ${TOKENRING_ADMIN_PASSWORD:-}
+      # 32 bytes, hex or base64. Generate: openssl rand -hex 32
+      # Leave unset and one is created in the volume on first boot.
+      TOKENRING_ENCRYPTION_KEY: ${TOKENRING_ENCRYPTION_KEY:-}
+      TOKENRING_DEFAULT_PROVIDER_BASE_URL: ${TOKENRING_DEFAULT_PROVIDER_BASE_URL:-https://api.openai.com/v1}
+      TOKENRING_PUBLIC_URL: ${TOKENRING_PUBLIC_URL:-}
+      TOKENRING_LOG_LEVEL: ${TOKENRING_LOG_LEVEL:-info}
+    volumes:
+      - tokenring-data:/data
+
+volumes:
+  tokenring-data:

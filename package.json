@@ -1,0 +1,22 @@
+{
+  "name": "tokenring",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TokenRing — an OpenAI-compatible proxy that load-balances a shared pool of upstream API keys.",
+  "type": "module",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "dev": "npm run dev --workspace=server & npm run dev --workspace=web",
+    "dev:server": "npm run dev --workspace=server",
+    "dev:web": "npm run dev --workspace=web",
+    "build": "npm run build --workspace=web && npm run build --workspace=server",
+    "start": "node server/dist/main.js",
+    "typecheck": "npm run typecheck --workspace=server && npm run typecheck --workspace=web"
+  }
+}
