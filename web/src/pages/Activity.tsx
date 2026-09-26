@@ -16,6 +16,11 @@ function statusBadge(log: RequestLog) {
   return <Badge tone="critical">{log.statusCode || 'error'}</Badge>;
 }
 
+// One page's worth of rows in the DOM at a time -- this is a live activity
+// feed, and letting "load more" accumulate forever (the previous design) is
+// exactly how the page ends up rendering thousands of rows and turns heavy.
+const PAGE_SIZE = 60;
+
 export function Activity() {
   const [params, setParams] = useSearchParams();
   const [status, setStatus] = useState<StatusFilter>(
@@ -26,8 +31,12 @@ export function Activity() {
   const [upstreamKeyId, setUpstreamKeyId] = useState(params.get('upstreamKeyId') ?? '');
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<RequestLog | null>(null);
-  const [extra, setExtra] = useState<RequestLog[]>([]);
-  const [loadingMore, setLoadingMore] = useState(false);
+
+  // pageIndex 0 is the live page (no cursor -- always the newest rows).
+  // cursorStack[i] is the "before" cursor that fetches page i, so "Newer"
+  // can go back to an already-known page without re-fetching from the start.
+  const [pageIndex, setPageIndex] = useState(0);
+  const [cursorStack, setCursorStack] = useState<Array<number | undefined>>([undefined]);
 
   // Keep the URL in step so a filtered view can be shared or reloaded.
   useEffect(() => {
@@ -37,21 +46,27 @@ export function Activity() {
     if (virtualKeyId) next.set('virtualKeyId', virtualKeyId);
     if (upstreamKeyId) next.set('upstreamKeyId', upstreamKeyId);
     setParams(next, { replace: true });
-    setExtra([]);
+    // A changed filter invalidates every cursor computed under the old one.
+    setPageIndex(0);
+    setCursorStack([undefined]);
   }, [status, model, virtualKeyId, upstreamKeyId, setParams]);
 
   const logs = useResource(
     () =>
       api.logs({
-        limit: 60,
+        limit: PAGE_SIZE,
+        before: cursorStack[pageIndex],
         status: status === 'all' ? undefined : status,
         model: model || undefined,
         virtualKeyId: virtualKeyId || undefined,
         upstreamKeyId: upstreamKeyId || undefined,
         search: search || undefined,
       }),
-    [status, model, virtualKeyId, upstreamKeyId, search],
-    { pollMs: 10_000 },
+    [pageIndex, cursorStack, status, model, virtualKeyId, upstreamKeyId, search],
+    // Polling only makes sense on the live page -- refreshing a historical
+    // page on a timer would just replace what the operator is looking at
+    // with... the same historical page, for no benefit and a wasted request.
+    { pollMs: pageIndex === 0 ? 10_000 : undefined },
   );
 
   const virtualKeys = useResource(() => api.virtualKeys('30d'), []);
@@ -66,26 +81,22 @@ export function Activity() {
     [upstreamKeys.data],
   );
 
-  const rows = [...(logs.data?.logs ?? []), ...extra];
+  const rows = logs.data?.logs ?? [];
+  const hasOlder = rows.length >= PAGE_SIZE && logs.data?.nextCursor != null;
+  const hasNewer = pageIndex > 0;
 
-  async function loadMore() {
-    const cursor = rows.at(-1)?.id;
-    if (!cursor) return;
-    setLoadingMore(true);
-    try {
-      const page = await api.logs({
-        limit: 60,
-        before: cursor,
-        status: status === 'all' ? undefined : status,
-        model: model || undefined,
-        virtualKeyId: virtualKeyId || undefined,
-        upstreamKeyId: upstreamKeyId || undefined,
-        search: search || undefined,
-      });
-      setExtra((current) => [...current, ...page.logs]);
-    } finally {
-      setLoadingMore(false);
-    }
+  function goOlder() {
+    const cursor = logs.data?.nextCursor;
+    if (cursor == null) return;
+    setCursorStack((stack) => {
+      const withThis = stack.slice(0, pageIndex + 1);
+      withThis[pageIndex + 1] = cursor;
+      return withThis;
+    });
+    setPageIndex((index) => index + 1);
+  }
+  function goNewer() {
+    setPageIndex((index) => Math.max(0, index - 1));
   }
 
   return (
@@ -97,10 +108,7 @@ export function Activity() {
           <button
             type="button"
             className="btn btn-ghost btn-sm btn-icon"
-            onClick={() => {
-              setExtra([]);
-              void logs.reload();
-            }}
+            onClick={() => void logs.reload()}
             aria-label="Refresh"
           >
             <IconRefresh />
@@ -253,10 +261,24 @@ export function Activity() {
             </div>
           )}
 
-          {rows.length >= 60 && (
-            <div style={{ padding: 14, textAlign: 'center', borderTop: '1px solid var(--border)' }}>
-              <button type="button" className="btn btn-sm" disabled={loadingMore} onClick={() => void loadMore()}>
-                {loadingMore ? 'Loading…' : 'Load older requests'}
+          {(hasNewer || hasOlder) && (
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                padding: 14,
+                borderTop: '1px solid var(--border)',
+              }}
+            >
+              <button type="button" className="btn btn-sm" disabled={!hasNewer} onClick={goNewer}>
+                ← Newer
+              </button>
+              <span className="muted" style={{ fontSize: 13 }}>
+                {pageIndex === 0 ? 'Latest' : `Page ${pageIndex + 1}`}
+              </span>
+              <button type="button" className="btn btn-sm" disabled={!hasOlder || logs.loading} onClick={goOlder}>
+                {logs.loading && pageIndex > 0 ? 'Loading…' : 'Older →'}
               </button>
             </div>
           )}

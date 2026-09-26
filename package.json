@@ -1,6 +1,6 @@
 {
   "name": "tokenring",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "TokenRing — an OpenAI-compatible proxy that load-balances a shared pool of upstream API keys.",
   "type": "module",
