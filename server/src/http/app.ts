@@ -37,6 +37,8 @@ export async function buildApp(): Promise<FastifyInstance> {
     logger: { level: env.logLevel },
     bodyLimit: BODY_LIMIT,
     trustProxy: env.trustProxy,
+    // Response deadlines are owned by upstreamClient, not socket inactivity.
+    connectionTimeout: 0,
     // Every proxied request is recorded in the activity log already; Fastify's
     // own per-request lines would only duplicate it.
     logController: new LogController({ disableRequestLogging: true }),

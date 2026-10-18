@@ -14,7 +14,7 @@ export interface RuntimeSettings {
   strategy: BalancingStrategy;
   /** Distinct upstream keys to try before giving up on a request. */
   maxAttempts: number;
-  /** Abort an upstream request that produces no response within this budget. */
+  /** Total upstream response deadline, including the body. 0 disables it. */
   requestTimeoutMs: number;
   /** Fallback quarantine length after a 429 that carries no Retry-After. */
   rateLimitCooldownSeconds: number;
@@ -39,7 +39,7 @@ export interface RuntimeSettings {
 export const DEFAULT_SETTINGS: RuntimeSettings = {
   strategy: 'least_loaded',
   maxAttempts: 3,
-  requestTimeoutMs: 120_000,
+  requestTimeoutMs: 1_200_000,
   rateLimitCooldownSeconds: 20,
   failureCooldownSeconds: 30,
   failureThreshold: 3,

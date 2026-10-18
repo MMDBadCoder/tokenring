@@ -1,4 +1,5 @@
 import type { ServerResponse } from 'node:http';
+import type { Response } from 'undici';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import type { ProviderRow, UpstreamKeyRow, VirtualKeyRow } from '../db/types.js';
@@ -162,7 +163,7 @@ async function readErrorDetail(response: Response): Promise<string> {
 
 function sendError(res: ServerResponse, error: ProxyError): void {
   if (res.headersSent) {
-    res.end();
+    res.destroy(error);
     return;
   }
   const headers: Record<string, string> = { 'content-type': 'application/json' };
@@ -185,6 +186,24 @@ interface Attempt {
  * records exactly what it cost.
  */
 export async function runProxyRequest(ctx: ProxyContext, res: ServerResponse): Promise<void> {
+  const controller = new AbortController();
+  const onClose = (): void => {
+    if (!res.writableFinished) controller.abort(new Error('client disconnected'));
+  };
+  res.on('close', onClose);
+  if (res.destroyed) onClose();
+  try {
+    await proxyRequest(ctx, res, controller.signal);
+  } finally {
+    res.off('close', onClose);
+  }
+}
+
+async function proxyRequest(
+  ctx: ProxyContext,
+  res: ServerResponse,
+  signal: AbortSignal,
+): Promise<void> {
   const settings = settingsRepo.all();
   const requestAt = Date.now();
   const inspected = inspectRequest(ctx.body);
@@ -222,7 +241,7 @@ export async function runProxyRequest(ctx: ProxyContext, res: ServerResponse): P
     log.errorKind = error.code;
     log.errorMessage = error.message;
     finish();
-    sendError(res, error);
+    if (!signal.aborted) sendError(res, error);
   };
 
   let provider: ProviderRow;
@@ -249,6 +268,7 @@ export async function runProxyRequest(ctx: ProxyContext, res: ServerResponse): P
   let lastAttempt: Attempt | null = null;
 
   for (let attempt = 1; attempt <= settings.maxAttempts; attempt += 1) {
+    if (signal.aborted) return;
     const candidates = upstreamKeysRepo.listUsable(provider.id);
     let selection = selectUpstreamKey(candidates, settings.strategy, {
       excluded: tried,
@@ -260,7 +280,11 @@ export async function runProxyRequest(ctx: ProxyContext, res: ServerResponse): P
       const now = Date.now();
       const waitFor = Math.min(selection.readyAt - now, waitDeadline - now, 1000);
       if (waitFor <= 0) break;
-      await sleep(waitFor);
+      try {
+        await sleep(waitFor, undefined, { signal });
+      } catch {
+        return; // Client left while waiting for capacity.
+      }
       selection = selectUpstreamKey(upstreamKeysRepo.listUsable(provider.id), settings.strategy, {
         excluded: tried,
         cursorKey: provider.id,
@@ -314,8 +338,14 @@ export async function runProxyRequest(ctx: ProxyContext, res: ServerResponse): P
         body: outgoingBody,
         secret: decryptSecret(key.secret_encrypted),
         timeoutMs: settings.requestTimeoutMs,
+        signal,
       });
     } catch (error) {
+      if (signal.aborted) {
+        log.errorKind = 'client_disconnected';
+        finish();
+        return;
+      }
       const failure = classifyNetworkError(error);
       const detail = error instanceof Error ? error.message : String(error);
       penaliseKey(key, failure, detail, null, settings);
@@ -323,13 +353,14 @@ export async function runProxyRequest(ctx: ProxyContext, res: ServerResponse): P
       continue;
     }
 
-    const { response, ttfbMs, abort } = result;
+    const { response, ttfbMs, dispose } = result;
     log.ttfbMs = ttfbMs;
     const failure = classifyStatus(response.status);
 
     if (failure) {
       const detail = await readErrorDetail(response);
-      abort();
+      dispose();
+      if (signal.aborted) return;
       penaliseKey(key, failure, detail, parseRetryAfter(response.headers.get('retry-after')), settings);
       lastAttempt = { key, failure, detail };
 
@@ -353,19 +384,28 @@ export async function runProxyRequest(ctx: ProxyContext, res: ServerResponse): P
     log.statusCode = response.status;
     log.succeeded = response.status < 400;
 
-    await deliver(response, res, {
-      log,
-      settings,
-      inspected,
-      virtualKeyId: ctx.virtualKey.id,
-      upstreamKeyId: key.id,
-      requestAt,
-      dispatchedAt,
-      onDone: () => {
-        abort();
-        finish();
-      },
-    });
+    try {
+      await deliver(response, res, {
+        log,
+        settings,
+        inspected,
+        virtualKeyId: ctx.virtualKey.id,
+        upstreamKeyId: key.id,
+        requestAt,
+        dispatchedAt,
+      });
+    } catch (error) {
+      log.succeeded = false;
+      log.errorKind = signal.aborted ? 'client_disconnected' : classifyNetworkError(error);
+      log.errorMessage = error instanceof Error ? error.message : String(error);
+      if (!signal.aborted) {
+        if (!res.headersSent) log.statusCode = 502;
+        sendError(res, badGateway('Upstream response interrupted.', log.errorKind));
+      }
+    } finally {
+      dispose();
+      finish();
+    }
     return;
   }
 
@@ -398,7 +438,6 @@ interface DeliverOptions {
   upstreamKeyId: string;
   requestAt: number;
   dispatchedAt: number;
-  onDone: () => void;
 }
 
 /** Forwards the upstream response to the client and books the tokens it used. */
@@ -435,7 +474,6 @@ async function deliver(
   if (!response.body) {
     res.writeHead(response.status, headers);
     res.end();
-    options.onDone();
     return;
   }
 
@@ -451,7 +489,6 @@ async function deliver(
 
     res.writeHead(response.status, { ...headers, 'content-length': String(buffer.byteLength) });
     res.end(buffer);
-    options.onDone();
     return;
   }
 
@@ -473,7 +510,20 @@ async function deliver(
       if (done || clientGone) break;
       scanner?.push(value);
       if (!res.write(Buffer.from(value))) {
-        await new Promise<void>((resolve) => res.once('drain', resolve));
+        await new Promise<void>((resolve, reject) => {
+          const cleanup = (): void => {
+            res.off('drain', onDrain);
+            res.off('close', onCloseDrain);
+            res.off('error', onError);
+          };
+          const onDrain = (): void => { cleanup(); resolve(); };
+          const onCloseDrain = (): void => { cleanup(); resolve(); };
+          const onError = (error: Error): void => { cleanup(); reject(error); };
+          res.once('drain', onDrain);
+          res.once('close', onCloseDrain);
+          res.once('error', onError);
+          if (res.destroyed) onCloseDrain();
+        });
       }
     }
     scanner?.finish();
@@ -481,6 +531,8 @@ async function deliver(
     log.succeeded = false;
     log.errorKind = 'stream_interrupted';
     log.errorMessage = error instanceof Error ? error.message : String(error);
+    // An incomplete upstream stream must not look like successful EOF.
+    res.destroy(error instanceof Error ? error : new Error(String(error)));
   } finally {
     res.off('close', onClose);
   }
@@ -495,6 +547,5 @@ async function deliver(
   else if (canEstimate) book(estimate(scanner?.getCompletionChars() ?? 0), 'estimated');
   else book(NO_USAGE, 'none');
 
-  if (!res.writableEnded) res.end();
-  options.onDone();
+  if (!res.writableEnded && !res.destroyed) res.end();
 }

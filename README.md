@@ -146,7 +146,7 @@ The environment only covers what must be known before the process starts — see
 | Balancing strategy | `least_loaded` | How the next key is chosen. |
 | Attempts per request | `3` | Distinct keys tried before giving up. |
 | Wait for capacity | `10s` | Hold a request while the pool is saturated instead of returning `429`. |
-| Upstream timeout | `120s` | Abort an upstream call that produces no response. |
+| Upstream response deadline | `1200s` | Total time per upstream attempt, including the complete body/stream. `0` disables the deadline. |
 | Rate-limit cooldown | `20s` | Quarantine after a `429` with no `Retry-After`. |
 | Failure cooldown / threshold | `30s` / `3` | Quarantine after repeated connection or `5xx` failures. |
 | Disable on auth error | on | A `401`/`403` means the key is revoked. |
@@ -154,6 +154,34 @@ The environment only covers what must be known before the process starts — see
 | Estimate missing tokens | on | Approximates when the provider reports none; such rows are marked `≈`. |
 | Forward `x-ratelimit-*` headers | off | Those describe one pooled key, not the pool. |
 | Keep activity for | `30` days | Older request logs are pruned automatically. |
+
+### Long-running LLM responses
+
+In **Settings → Upstream response deadline**, use `600` seconds for 10 minutes,
+`1200` for 20 minutes, or `0` for unlimited. The API setting is
+`requestTimeoutMs` (`600000`, `1200000`, or `0`). Finite values from 1 to 1200
+seconds are supported. Changes apply to the next request, without a restart.
+The deadline runs from dispatch through the complete response body, including
+active streams; it is not an idle timeout and is per attempt, not per client request.
+
+The 20-minute default applies when no timeout has been saved. Existing saved
+values stay unchanged: update them explicitly to opt in. Unlimited mode removes
+TokenRing's response deadline and the upstream HTTP client's header/body idle
+limits; TCP/TLS connection establishment still has a 10-second limit. Client
+cancellation and genuine upstream/network failures still end requests. The dashboard
+key connectivity probe keeps its separate maximum 20-second diagnostic deadline.
+
+Align client SDK and reverse-proxy/load-balancer timeouts with your workload.
+For nginx, `proxy_read_timeout 1200s` allows up to 20 minutes of silence between
+reads, not an unlimited response wait; unlimited TokenRing mode does not disable
+external limits. Process shutdowns and provider limits can still close connections.
+TokenRing does not inject synthetic SSE heartbeats or completion events.
+
+To keep request payloads unchanged, disable **Ask for token counts on streamed
+replies** (`injectUsageTracking`). To avoid automatic failover/repeated inference,
+set **Attempts per request** to `1`. Successful response bodies and SSE bytes are forwarded
+without model-output changes; authentication and hop-by-hop headers still follow
+normal proxy handling. No retry is made after response delivery starts.
 
 ## How balancing works
 
@@ -266,6 +294,18 @@ The dashboard API under `/api/*` uses a session cookie:
 - Token counts come from the provider's `usage` field. When a provider omits it
   and estimation is on, the figure is approximate and marked `≈`.
 - Costs are not modelled — TokenRing counts tokens, not currency.
+
+## Tests
+
+Run `npm ci`, `npm test`, `npm run typecheck`, and `npm run build`.
+The tests use an isolated temporary database and a local mock upstream.
+For an optional real-time regression past the former 2-minute deadline, run
+`LONG_TIMEOUT_TESTS=1 npm test`. To also cross the HTTP client's former 5-minute
+response limits, run `LONG_TIMEOUT_TESTS=1 LONG_TIMEOUT_DELAY_MS=305000 npm test`.
+Both finite and unlimited modes are exercised with delayed headers, delayed JSON
+bodies, a long silence between SSE events, and continuously progressing streams.
+The default suite uses short waits
+for deadline, cancellation, persistence, and byte-preservation checks.
 
 ## Licence
 

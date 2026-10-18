@@ -49,8 +49,8 @@ const NUMBER_FIELDS: {
   },
   {
     key: 'requestTimeoutMs',
-    label: 'Upstream timeout',
-    help: 'Abort an upstream call that produces no response in this time.',
+    label: 'Upstream response deadline',
+    help: 'Total time per attempt, including the full response or stream. Default: 1200 seconds (20 minutes). Set 0 for unlimited. Existing saved values are preserved.',
     suffix: 'seconds',
     scale: 1_000,
   },

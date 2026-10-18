@@ -1,3 +1,4 @@
+import { closeUpstreamClient } from './core/upstreamClient.js';
 import { env } from './config/env.js';
 import { db, closeDb } from './db/database.js';
 import { providersRepo } from './db/repositories/providers.js';
@@ -60,7 +61,8 @@ async function start(): Promise<void> {
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.once(signal, () => {
       app.log.info(`${signal} received, shutting down.`);
-      void app.close().then(() => {
+      void app.close().then(async () => {
+        await closeUpstreamClient();
         closeDb();
         process.exit(0);
       });

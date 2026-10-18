@@ -391,8 +391,8 @@ server {
         proxy_cache off;
 
         # LLM calls are slow. The default 60s will cut long generations short.
-        proxy_read_timeout 600s;
-        proxy_send_timeout 600s;
+        proxy_read_timeout 1200s;
+        proxy_send_timeout 1200s;
 
         client_max_body_size 64m;   # requests can carry base64 images
     }
@@ -453,7 +453,7 @@ real keys — see the backup note in [§10](#10-everyday-operations).
 | Balancing strategy | Least loaded | How the next key is picked. |
 | Attempts per request | `3` | How many different keys to try before giving up. |
 | Wait for capacity | `10s` | Hold a request while the pool is saturated instead of failing it. |
-| Upstream timeout | `120s` | Give up on an upstream call that produces nothing. |
+| Upstream response deadline | `1200s` | Total time per upstream attempt, including the complete body/stream. `0` disables the deadline. |
 | Rate-limit cooldown | `20s` | Quarantine after a `429` that carries no `Retry-After`. |
 | Failure cooldown | `30s` | Quarantine after connection errors or `5xx`. |
 | Failures before quarantine | `3` | How many consecutive failures are tolerated first. |
@@ -585,7 +585,7 @@ counts the keys currently enabled — if it drops, one has been auto-disabled.
 | `429 key_rpm_exceeded` | This one TokenRing key hit *its own* quota, not the pool's. | Raise or clear the quota on that key. |
 | `503 no_upstream_key` | No enabled real key exists for the provider. | Add one, or re-enable a disabled one under **Upstream keys**. |
 | `502` with `auth_failed` | Every real key was rejected by the provider. | Test each key with the **⚡** button; replace the ones that fail. |
-| Everything is slow, then fails | The provider is slow, or the timeout is too short. | Raise **Upstream timeout**; check `proxy_read_timeout` if nginx is in front. |
+| Everything is slow, then fails | The provider is slow, or the timeout is too short. | Raise **Upstream response deadline**; check `proxy_read_timeout` if nginx is in front. |
 | Streaming arrives all at once | A reverse proxy is buffering the response. | `proxy_buffering off` in nginx, `flush_interval -1` in Caddy. |
 | Token counts show `≈` | The provider reported no usage, so it was estimated. | Turn on **Ask for token counts on streamed replies**, or accept the estimate. |
 | Charts are empty | No traffic in the selected window. | Switch the range (1h / 24h / 7d / 30d) in the top right. |
