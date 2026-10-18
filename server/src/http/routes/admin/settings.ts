@@ -11,7 +11,10 @@ import { DAY } from '../../../util/time.js';
 const settingsSchema = z.object({
   strategy: z.enum(BALANCING_STRATEGIES).optional(),
   maxAttempts: z.number().int().min(1).max(10).optional(),
-  requestTimeoutMs: z.number().int().min(1_000).max(600_000).optional(),
+  requestTimeoutMs: z.number().int().min(0).max(1_200_000).refine(
+    (value) => value === 0 || value >= 1_000,
+    'Use 0 for unlimited, or 1000–1200000 milliseconds.',
+  ).optional(),
   rateLimitCooldownSeconds: z.number().int().min(0).max(3_600).optional(),
   failureCooldownSeconds: z.number().int().min(0).max(3_600).optional(),
   failureThreshold: z.number().int().min(1).max(20).optional(),

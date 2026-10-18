@@ -100,9 +100,11 @@ export async function registerUpstreamKeyRoutes(app: FastifyInstance): Promise<v
 
     const startedAt = Date.now();
     const controller = new AbortController();
+    // The dashboard connectivity probe stays bounded even in unlimited mode.
+    const responseDeadline = settingsRepo.all().requestTimeoutMs;
     const timeout = setTimeout(
       () => controller.abort(),
-      Math.min(settingsRepo.all().requestTimeoutMs, 20_000),
+      responseDeadline === 0 ? 20_000 : Math.min(responseDeadline, 20_000),
     );
 
     try {

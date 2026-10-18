@@ -1,3 +1,17 @@
+import { Agent, fetch, type Response } from 'undici';
+
+// Disable hidden response-header/body idle limits. Our per-request timer owns
+// the entire response deadline; connection establishment still has a 10s limit.
+const upstreamAgent = new Agent({
+  headersTimeout: 0,
+  bodyTimeout: 0,
+  connect: { timeout: 10_000 },
+});
+
+export async function closeUpstreamClient(): Promise<void> {
+  await upstreamAgent.close();
+}
+
 /** Headers that belong to a single hop and must never be forwarded. */
 const HOP_BY_HOP = new Set([
   'connection',
@@ -40,12 +54,13 @@ export interface DispatchRequest {
   body: Buffer | null;
   secret: string;
   timeoutMs: number;
+  signal?: AbortSignal;
 }
 
 export interface DispatchResult {
   response: Response;
   ttfbMs: number;
-  abort: () => void;
+  dispose: () => void;
 }
 
 export function buildUpstreamUrl(baseUrl: string, path: string, search: string): string {
@@ -88,7 +103,19 @@ export function copyResponseHeaders(
 
 export async function dispatch(request: DispatchRequest): Promise<DispatchResult> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error('timeout')), request.timeoutMs);
+  const timer = request.timeoutMs > 0
+    ? setTimeout(() => controller.abort(new Error('timeout')), request.timeoutMs)
+    : undefined;
+  timer?.unref();
+  const onAbort = (): void => controller.abort(request.signal?.reason);
+  request.signal?.addEventListener('abort', onAbort, { once: true });
+  if (request.signal?.aborted) onAbort();
+  const dispose = (): void => {
+    clearTimeout(timer);
+    request.signal?.removeEventListener('abort', onAbort);
+    // Also release a response body abandoned by the caller.
+    controller.abort();
+  };
   const startedAt = Date.now();
 
   try {
@@ -100,16 +127,17 @@ export async function dispatch(request: DispatchRequest): Promise<DispatchResult
         body: request.body ?? undefined,
         signal: controller.signal,
         redirect: 'follow',
+        dispatcher: upstreamAgent,
       },
     );
     return {
       response,
       ttfbMs: Date.now() - startedAt,
-      // The timer must outlive the headers so a stalled body still aborts.
-      abort: () => clearTimeout(timer),
+      // Keep the deadline active until the complete body has been delivered.
+      dispose,
     };
   } catch (error) {
-    clearTimeout(timer);
+    dispose();
     throw error;
   }
 }
